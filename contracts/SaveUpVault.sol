@@ -22,6 +22,10 @@ contract SaveUpVault is ERC4626Fees, Ownable {
     error SaveUpVault_RewardAlreadyClaimed();
     error SaveUpVault_NoBalanceToWithdraw();
     error SaveUpVault_InvalidFeeReceiverAddress();
+    error SaveUpVault_InvalidRewardAmount();
+    error SaveUpVault_InvalidBonusPercentage();
+    error SaveUpVault_InvalidStrategyAddress();
+    error SaveUpVault_StrategyAlreadyAdded();
 
     struct Challenge {
         uint256 id;
@@ -44,6 +48,9 @@ contract SaveUpVault is ERC4626Fees, Ownable {
     mapping(uint256 => Challenge) public challenges;
     mapping(address => uint256[]) public userChallenges;
     address public feeReceiverAddress;
+    
+    uint256 public baseRewardAmount;
+    uint256 public firstReacherBonusPercent; // Percentage multiplied by 100 (e.g., 1000 = 10%)
 
     event ChallengeCreated(uint256 indexed id, address indexed creator, uint256 targetAmount, uint256 endTime);
     event JoinedChallenge(uint256 indexed id, address indexed participant);
@@ -52,6 +59,7 @@ contract SaveUpVault is ERC4626Fees, Ownable {
     event RewardClaimed(uint256 indexed id, address indexed participant);
     event Withdrawn(uint256 indexed id, address indexed participant, uint256 amount);
     event FeeReceiverChanged(address indexed newFeeReceiver);
+    event RewardConfigChanged(uint256 newBaseRewardAmount, uint256 newFirstReacherBonusPercent);
 
     constructor(IERC20 _asset, IERC20 _rewardToken)
         ERC20("SaveUp Vault Share", "svsUSDT")
@@ -62,18 +70,31 @@ contract SaveUpVault is ERC4626Fees, Ownable {
         feeReceiverAddress = msg.sender; // Initialize fee receiver to deployer
         emit FeeReceiverChanged(msg.sender);
 
+        // Set initial reward configuration
+        baseRewardAmount = 10e18; // 10 token
+        firstReacherBonusPercent = 1000; // 10%
+
         // Deploy and add Mock strategy
         MockStrategy mockStrategy = new MockStrategy(address(_asset), address(this));
         addStrategy(IStrategy(address(mockStrategy)));
     }
 
     function addStrategy(IStrategy strategy) public onlyOwner {
+        if (strategy == IStrategy(address(0))) revert SaveUpVault_InvalidStrategyAddress();
+        
+        // Check if strategy is already added
+        for (uint256 i = 0; i < strategies.length; i++) {
+            if (address(strategies[i]) == address(strategy)) {
+                revert SaveUpVault_StrategyAlreadyAdded();
+            }
+        }
+        
         strategies.push(strategy);
     }
 
-    function createChallenge(string memory name, uint256 targetAmount, uint256 duration) external returns (uint256) {
+    function createChallenge(string memory name, uint256 targetAmount, uint256 endDate) external returns (uint256) {
         if (targetAmount == 0) revert SaveUpVault_InvalidTargetAmount();
-        if (duration == 0) revert SaveUpVault_InvalidDuration();
+        if (endDate == 0 || endDate <= block.timestamp) revert SaveUpVault_InvalidDuration();
 
         uint256 id = challengeCount++;
         Challenge storage c = challenges[id];
@@ -82,7 +103,7 @@ contract SaveUpVault is ERC4626Fees, Ownable {
         c.creator = msg.sender;
         c.targetAmount = targetAmount;
         c.startTime = block.timestamp;
-        c.endTime = block.timestamp + duration;
+        c.endTime = endDate;
         c.participants.push(msg.sender);
 
         userChallenges[msg.sender].push(id);
@@ -90,7 +111,7 @@ contract SaveUpVault is ERC4626Fees, Ownable {
         return id;
     }
 
-    function joinChallenge(uint256 id) external {
+    function joinChallenge(uint256 id) public {
         Challenge storage c = challenges[id];
         if (block.timestamp >= c.endTime) revert SaveUpVault_ChallengeEnded();
         if (isParticipant(c, msg.sender)) revert SaveUpVault_AlreadyJoinedChallenge();
@@ -100,16 +121,32 @@ contract SaveUpVault is ERC4626Fees, Ownable {
         emit JoinedChallenge(id, msg.sender);
     }
 
-    function contribute(uint256 id, uint256 amount) external {
+    function getUserEarnings(uint256 id, address user) public view returns (uint256) {
+        Challenge storage c = challenges[id];
+        uint256 userShares = balanceOf(user); // Shares held by user
+        uint256 assetsEquivalent = convertToAssets(userShares);
+        uint256 deposited = c.contributions[user];
+
+        if (assetsEquivalent > deposited) {
+            return assetsEquivalent - deposited;
+        } else {
+            return 0;
+        }
+    }
+
+    function contribute(uint256 id, uint256 amount) public {
         Challenge storage c = challenges[id];
         if (block.timestamp >= c.endTime) revert SaveUpVault_ChallengeEnded();
         if (!isParticipant(c, msg.sender)) revert SaveUpVault_NotParticipant();
 
         IERC20(asset()).safeTransferFrom(msg.sender, address(this), amount);
-        depositToStrategies(amount);
+        
         c.contributions[msg.sender] += amount;
-        _mint(msg.sender, amount);
+
+        super.deposit(amount, msg.sender);
         emit Contributed(id, msg.sender, amount);
+
+        depositToStrategies(amount);
 
         if (!c.hasReachedGoal[msg.sender] && c.contributions[msg.sender] >= c.targetAmount) {
             c.hasReachedGoal[msg.sender] = true;
@@ -121,31 +158,30 @@ contract SaveUpVault is ERC4626Fees, Ownable {
         }
     }
 
-    function claimReward(uint256 id) external {
+    function claimReward(uint256 id) public {
         Challenge storage c = challenges[id];
         if (block.timestamp < c.endTime) revert SaveUpVault_ChallengeNotOver();
         if (!c.hasReachedGoal[msg.sender]) revert SaveUpVault_GoalNotReached();
         if (c.hasClaimedReward[msg.sender]) revert SaveUpVault_RewardAlreadyClaimed();
 
         c.hasClaimedReward[msg.sender] = true;
-        uint256 baseReward = 1e18; // Replace with real reward logic
-        uint256 bonus = (msg.sender == c.firstToReach) ? baseReward / 10 : 0;
-        rewardToken.safeTransfer(msg.sender, baseReward + bonus);
+        uint256 bonus = (msg.sender == c.firstToReach) ? (baseRewardAmount * firstReacherBonusPercent) / 10000 : 0;
+        rewardToken.safeTransfer(msg.sender, baseRewardAmount + bonus);
 
         emit RewardClaimed(id, msg.sender);
     }
 
-    function withdrawFromChallenge(uint256 id) external {
+    function withdrawFromChallenge(uint256 id) public {
         Challenge storage c = challenges[id];
         if (block.timestamp < c.endTime) revert SaveUpVault_ChallengeNotOver();
         if (!c.hasReachedGoal[msg.sender]) revert SaveUpVault_GoalNotReached();
         if (c.contributions[msg.sender] == 0) revert SaveUpVault_NoBalanceToWithdraw();
 
-        uint256 amount = c.contributions[msg.sender];
+        uint256 amount = maxWithdraw(msg.sender);// c.contributions[msg.sender];
         c.contributions[msg.sender] = 0;
         withdrawFromStrategies(amount, msg.sender);
-        _burn(msg.sender, amount);
-        IERC20(asset()).safeTransfer(msg.sender, amount);
+        withdraw(amount, msg.sender, msg.sender);
+        // IERC20(asset()).safeTransfer(msg.sender, amount);
 
         emit Withdrawn(id, msg.sender, amount);
     }
@@ -172,7 +208,7 @@ contract SaveUpVault is ERC4626Fees, Ownable {
         return false;
     }
 
-    function getUserProgress(uint256 id, address user) external view returns (uint256 contribution, uint256 target) {
+    function getUserProgress(uint256 id, address user) public view returns (uint256 contribution, uint256 target) {
         Challenge storage c = challenges[id];
         return (c.contributions[user], c.targetAmount);
     }
@@ -187,7 +223,7 @@ contract SaveUpVault is ERC4626Fees, Ownable {
         return 50; // 0.5%
     }
 
-    function setFeeReceiver(address _newFeeReceiver) external onlyOwner {
+    function setFeeReceiver(address _newFeeReceiver) public onlyOwner {
         if (_newFeeReceiver == address(0)) revert SaveUpVault_InvalidFeeReceiverAddress();
         feeReceiverAddress = _newFeeReceiver;
         emit FeeReceiverChanged(_newFeeReceiver);
@@ -201,5 +237,19 @@ contract SaveUpVault is ERC4626Fees, Ownable {
 
     function _exitFeeRecipient() internal view override returns (address) {
         return feeReceiverAddress;
+    }
+
+    // === Reward configuration ===
+
+    function setBaseRewardAmount(uint256 _newBaseRewardAmount) public onlyOwner {
+        if (_newBaseRewardAmount == 0) revert SaveUpVault_InvalidRewardAmount();
+        baseRewardAmount = _newBaseRewardAmount;
+        emit RewardConfigChanged(baseRewardAmount, firstReacherBonusPercent);
+    }
+
+    function setFirstReacherBonusPercent(uint256 _newBonusPercent) public onlyOwner {
+        if (_newBonusPercent > 10000) revert SaveUpVault_InvalidBonusPercentage(); // Cannot be more than 100%
+        firstReacherBonusPercent = _newBonusPercent;
+        emit RewardConfigChanged(baseRewardAmount, firstReacherBonusPercent);
     }
 }

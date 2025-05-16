@@ -5,7 +5,7 @@ import "./IStrategy.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@aave/core-v3/contracts/interfaces/IPool.sol";
 
-contract AaveStrategy is IStrategy {
+contract AaveV3Strategy is IStrategy {
     IPool public aavePool;
     IERC20 public asset;
     address public aToken;

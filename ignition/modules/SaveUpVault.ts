@@ -1,27 +1,32 @@
-// // hardhat-ignition/modules/DeploySavingsChallenge.ts
-// import { buildModule } from "@nomicfoundation/hardhat-ignition/modules";
+// hardhat-ignition/modules/DeploySavingsChallenge.ts
+import { buildModule } from "@nomicfoundation/hardhat-ignition/modules";
 
-// export default buildModule("SavingsChallengeModule", (m) => {
-//   const rewardToken = m.contract("SaveUpRewardToken", []);
+export default buildModule("SavingsChallengeModule", (m) => {
+  // Deploy tokens
+  const assetToken = m.contract("MockUSDT", []); // Mock USDT for testing
+  const rewardToken = m.contract("SaveUpToken", []);
 
+  // Deploy strategies
 //   const strategyAave = m.contract("AaveV3Strategy", []);
-//   const strategySecond = m.contract("MockYieldStrategy", []); // Replace with actual strategy if available
+//   const strategySecond = m.contract("MockStrategy", [assetToken, challengeVault]); // Replace with actual strategy if available
 
-//   const challengeVault = m.contract("SaveUpVault", [
-//     rewardToken,
-//     [strategyAave, strategySecond] // Array of yield strategies
-//   ]);
+  // Deploy vault with asset and reward tokens
+  const challengeVault = m.contract("SaveUpVault", [
+    assetToken,
+    rewardToken
+  ]);
 
-//   const challengeManager = m.contract("SaveUpChallengeManager", [
-//     rewardToken,
-//     challengeVault
-//   ]);
+  // Add strategies to vault after deployment
+//   m.call(challengeVault, "addStrategy", [strategyAave]);
+//   m.call(challengeVault, "addStrategy", [strategySecond]);
+
 
 //   // Grant MINTER role to ChallengeManager for RewardToken
+//   const minterRole = m.staticCall(rewardToken, "MINTER_ROLE", []);
 //   m.call(rewardToken, "grantRole", [
-//     m.call(rewardToken, "MINTER_ROLE"),
-//     challengeManager
+//     minterRole, // The role hash
+//     challengeManager // Contract reference is automatically resolved to address
 //   ]);
 
-//   return { rewardToken, strategyAave, strategySecond, challengeVault, challengeManager };
-// });
+  return { rewardToken,   challengeVault };
+});
